@@ -2927,6 +2927,69 @@ class PluginContext:
         )
         return handle
 
+    # -- telegram callback handler registration -----------------------------
+
+    def register_telegram_callback_handler(
+        self,
+        matcher: Any,
+        callback: Callable,
+    ) -> None:
+        """Register a handler for namespaced Telegram callback data.
+
+        ``matcher`` may be a non-empty literal prefix string (for example
+        ``"inbox:"``) or a compiled regular expression. Callbacks receive
+        ``(adapter, query, context)`` and may be synchronous or asynchronous.
+        Returning ``True`` or ``{"handled": True}`` claims the callback.
+        """
+        if not callable(callback):
+            raise ValueError(
+                f"Plugin '{self.manifest.name}' tried to register a Telegram "
+                "callback handler with a non-callable callback."
+            )
+        if isinstance(matcher, str):
+            matcher = matcher.strip()
+            if not matcher or ":" not in matcher:
+                raise ValueError(
+                    f"Plugin '{self.manifest.name}' Telegram callback prefix "
+                    "must be non-empty and namespaced (for example 'plugin:')."
+                )
+            matcher_key = ("prefix", matcher)
+        elif callable(getattr(matcher, "match", None)):
+            matcher_key = (
+                "regex",
+                getattr(matcher, "pattern", repr(matcher)),
+                getattr(matcher, "flags", None),
+            )
+        else:
+            raise ValueError(
+                f"Plugin '{self.manifest.name}' Telegram callback matcher must "
+                "be a literal prefix string or compiled regular expression."
+            )
+
+        for existing, _callback, plugin_name in self._manager._telegram_callback_handlers:
+            if isinstance(existing, str):
+                existing_key = ("prefix", existing)
+            else:
+                existing_key = (
+                    "regex",
+                    getattr(existing, "pattern", repr(existing)),
+                    getattr(existing, "flags", None),
+                )
+            if existing_key == matcher_key:
+                raise ValueError(
+                    f"Plugin '{self.manifest.name}' Telegram callback matcher "
+                    f"conflicts with plugin '{plugin_name}'."
+                )
+
+        self._manager._telegram_callback_handlers.append(
+            (matcher, callback, self.manifest.name)
+        )
+        logger.debug(
+            "Plugin %s registered Telegram callback handler: %s",
+            self.manifest.name,
+            matcher_key[1],
+        )
+
     # -- hook registration --------------------------------------------------
 
     # -- auxiliary task registration ---------------------------------------
@@ -3462,6 +3525,9 @@ class PluginManager:
         # full plugin loads.
         self._predeclared_modules: Dict[str, types.ModuleType] = {}
         self._predeclared_tools: Dict[str, List[str]] = {}
+        # Telegram inline-keyboard callback handlers registered by plugins.
+        # Each entry is (prefix_or_regex, callback, plugin_name).
+        self._telegram_callback_handlers: List[tuple] = []
 
     # -----------------------------------------------------------------------
     # Registration ledger internals
@@ -3727,6 +3793,7 @@ class PluginManager:
             self._slack_action_handlers.clear()
             self._predeclared_modules.clear()
             self._predeclared_tools.clear()
+            self._telegram_callback_handlers.clear()
             self._context_engine = None
             self._discovered = False
         else:
@@ -5450,6 +5517,10 @@ class PluginManager:
         :meth:`PluginContext.register_slack_action_handler`.
         """
         return list(self._slack_action_handlers)
+
+    def get_telegram_callback_handlers(self) -> List[tuple]:
+        """Return plugin Telegram callback handlers in registration order."""
+        return list(self._telegram_callback_handlers)
 
     # -----------------------------------------------------------------------
     # Introspection
