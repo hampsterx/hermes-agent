@@ -190,25 +190,9 @@ class CLIAgentSetupMixin:
 
         return True
 
-    def _runtime_credentials_ready(self) -> bool:
-        """Silently probe whether any inference provider can be resolved.
-
-        Unlike ``_ensure_runtime_credentials`` this never prints and never
-        mutates CLI state — it exists so the interactive first-run path can
-        detect a completely unconfigured install *before* the user types a
-        message into a chat that cannot work (#62935-adjacent UX class:
-        keyless first run must route into onboarding, not a broken chat).
-        """
-        from hermes_cli.runtime_provider import resolve_runtime_provider
-
-        try:
-            runtime = resolve_runtime_provider(
-                requested=self.requested_provider,
-                explicit_api_key=self._explicit_api_key,
-                explicit_base_url=self._explicit_base_url,
-            )
-        except Exception:
-            return False
+    @staticmethod
+    def _runtime_is_usable(runtime) -> bool:
+        """Whether a resolved runtime dict can actually serve a turn."""
         if not isinstance(runtime, dict):
             return False
         api_key = runtime.get("api_key")
@@ -223,6 +207,57 @@ class CLIAgentSetupMixin:
             and base_url
             and not base_url_host_matches(base_url, "openrouter.ai")
         )
+
+    def _runtime_credentials_ready(self) -> bool:
+        """Silently probe whether any inference provider can be resolved.
+
+        Unlike ``_ensure_runtime_credentials`` this never prints and never
+        mutates CLI state — it exists so the interactive first-run path can
+        detect a completely unconfigured install *before* the user types a
+        message into a chat that cannot work (#62935-adjacent UX class:
+        keyless first run must route into onboarding, not a broken chat).
+
+        The fallback chain counts. ``_ensure_runtime_credentials`` walks it on
+        the very next turn, so an install whose primary is merely rate-limited
+        is NOT unconfigured, and routing it into onboarding invites the user to
+        overwrite a working ``model.provider`` with a fallback. Mirrors that
+        walk exactly (same ``resolve_entry_api_key`` / ``base_url`` handling) so
+        the probe and the resolver cannot disagree.
+        """
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        try:
+            runtime = resolve_runtime_provider(
+                requested=self.requested_provider,
+                explicit_api_key=self._explicit_api_key,
+                explicit_base_url=self._explicit_base_url,
+            )
+            if self._runtime_is_usable(runtime):
+                return True
+        except Exception:
+            pass
+
+        from hermes_cli.fallback_config import resolve_entry_api_key
+
+        chain = self._fallback_model if isinstance(self._fallback_model, list) else []
+        for entry in chain:
+            if not isinstance(entry, dict):
+                continue
+            provider = str(entry.get("provider") or "").strip().lower()
+            if not provider or not str(entry.get("model") or "").strip():
+                continue
+            kwargs = {"requested": provider}
+            if entry.get("base_url"):
+                kwargs["explicit_base_url"] = entry["base_url"]
+            try:
+                entry_key = resolve_entry_api_key(entry)
+                if entry_key:
+                    kwargs["explicit_api_key"] = entry_key
+                if self._runtime_is_usable(resolve_runtime_provider(**kwargs)):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _offer_first_run_setup(self) -> bool:
         """Offer the provider picker when no provider is configured at all.
