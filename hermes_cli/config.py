@@ -2232,6 +2232,37 @@ def warn_deprecated_cwd_env_vars(config: Optional[Dict[str, Any]] = None) -> Non
     messaging_cwd = os.environ.get("MESSAGING_CWD")
     terminal_cwd_env = os.environ.get("TERMINAL_CWD")
 
+    # Only report a variable this .env actually sets. cli.py force-exports
+    # TERMINAL_CWD from the config bridge on every start, and on a local
+    # backend it is unconditionally os.getcwd(), so reading it back out of
+    # os.environ reports Hermes' own export as a stale .env entry and tells
+    # the user to delete a line that is not there. The advertised fix does
+    # not work either: an explicit terminal.cwd is overwritten by
+    # os.getcwd() for local backends, so it silences the warning without
+    # changing behaviour.
+    def _set_in_env_file(key: str) -> bool:
+        try:
+            path = get_env_path()
+            if not path.is_file():
+                return False
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if line.startswith("export "):
+                        line = line[len("export "):].lstrip()
+                    if line.startswith(f"{key}=") and not line.startswith("#"):
+                        return True
+        except Exception:
+            # Unreadable .env: fall back to the old behaviour rather than
+            # suppressing a warning that might be real.
+            return True
+        return False
+
+    if messaging_cwd and not _set_in_env_file("MESSAGING_CWD"):
+        messaging_cwd = None
+    if terminal_cwd_env and not _set_in_env_file("TERMINAL_CWD"):
+        terminal_cwd_env = None
+
     if config is None:
         try:
             config = load_config()
